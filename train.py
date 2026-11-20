@@ -18,7 +18,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from tqdm import tqdm
 
-from config import MODEL_CONFIG, DIFFUSION_CONFIG, TRAIN_DEFAULTS
+from config import MODEL_CONFIG, DIFFUSION_CONFIG, TRAIN_DEFAULTS, COND_CONFIG
 from dataset import VoxelDataset
 from model import UNet
 from diffusion import GaussianDiffusion
@@ -45,8 +45,8 @@ def main():
                         num_workers=2, drop_last=True, pin_memory=True)
     print(f"训练样本数: {len(dataset)}, 每 epoch 步数: {len(loader)}")
 
-    model = UNet(**MODEL_CONFIG).to(device)
-    diffusion = GaussianDiffusion(model, **DIFFUSION_CONFIG).to(device)
+    model = UNet(**MODEL_CONFIG, cond_dim=COND_CONFIG["cond_dim"]).to(device)
+    diffusion = GaussianDiffusion(model, **DIFFUSION_CONFIG, uncond_prob=COND_CONFIG["uncond_prob"]).to(device)
 
     opt = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     warmup = LinearLR(opt, start_factor=0.01, end_factor=1.0, total_iters=args.warmup_epoch)
@@ -78,10 +78,11 @@ def main():
     for e in range(start_epoch, args.epoch):
         model.train()
         pbar = tqdm(total=len(dataset), desc=f"epoch {e}/{args.epoch}", dynamic_ncols=True)
-        for x in loader:
+        for x, cond in loader:
             x = x.to(device, non_blocking=True)
+            cond = cond.to(device, non_blocking=True)
             opt.zero_grad()
-            loss = diffusion.train_loss(x).mean()
+            loss = diffusion.train_loss(x, cond).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), TRAIN_DEFAULTS["grad_clip"])
             opt.step()

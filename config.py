@@ -28,6 +28,13 @@ DIFFUSION_CONFIG = {
 SEGMENT_T1 = 16484          # 孔隙 / 水化产物 分界
 SEGMENT_T2 = 29225          # 水化产物 / 未水化颗粒 分界
 
+# 条件生成配置（三相占比作为条件）
+COND_CONFIG = {
+    "cond_dim": 3,          # 条件维度（三相占比向量）
+    "uncond_prob": 0.1,     # 训练时随机丢弃条件的概率（classifier-free guidance）
+    "guidance_w": 1.8,      # 采样引导强度
+}
+
 # 默认训练配置（train.py 可用命令行覆盖）
 TRAIN_DEFAULTS = {
     "epoch": 300,          # 约 5 万步，约 8 小时

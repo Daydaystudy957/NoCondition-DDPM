@@ -1,4 +1,4 @@
-"""读取预处理好的 64³ 标签体素，转成 one-hot 三通道并归一化到 [-1,1]。"""
+"""读取预处理好的 64³ 标签体素，转成 one-hot 三通道 + 三相占比条件。"""
 import os
 import numpy as np
 import torch
@@ -24,4 +24,7 @@ class VoxelDataset(Dataset):
         onehot = np.moveaxis(onehot, -1, 0)         # (C,D,H,W)，值 0/1
         if self.normalize:
             onehot = onehot * 2.0 - 1.0             # 归一化到 [-1, 1]
-        return torch.from_numpy(onehot)
+
+        # 三相占比作为条件（值 0~1，和为 1）
+        cond = np.array([(label == i).mean() for i in range(self.num_phases)], dtype=np.float32)
+        return torch.from_numpy(onehot), torch.from_numpy(cond)

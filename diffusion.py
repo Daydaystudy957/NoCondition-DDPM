@@ -1,6 +1,8 @@
-"""DDPM 训练 + DDPM/DDIM 采样。
+"""条件 DDPM 训练 + DDPM/DDIM 采样（classifier-free guidance）。
 
-训练与采样共用同一套 beta 调度（修复原代码“训练线性、采样余弦”的不一致）。
+训练与采样共用同一套 beta 调度。条件为三相占比向量；
+训练时以 uncond_prob 概率随机丢弃条件，采样时用引导强度 w 控制。
+w=0 退化为无条件生成。
 """
 import torch
 import torch.nn as nn
@@ -32,10 +34,11 @@ def make_beta_schedule(beta_1, beta_T, T, schedule="linear"):
 
 
 class GaussianDiffusion(nn.Module):
-    def __init__(self, model, beta_1=1e-4, beta_T=0.02, T=1000, schedule="linear"):
+    def __init__(self, model, beta_1=1e-4, beta_T=0.02, T=1000, schedule="linear", uncond_prob=0.1):
         super().__init__()
         self.model = model
         self.T = T
+        self.uncond_prob = uncond_prob
 
         betas = make_beta_schedule(beta_1, beta_T, T, schedule)
         alphas = 1.0 - betas
@@ -62,13 +65,16 @@ class GaussianDiffusion(nn.Module):
             + extract(self.sqrt_one_minus_alphas_cumprod, t, x0.shape) * noise
         )
 
-    def train_loss(self, x0):
+    def train_loss(self, x0, cond):
         """返回每个样本的 MSE 噪声预测损失（shape: [batch]）。"""
         b = x0.shape[0]
         t = torch.randint(0, self.T, (b,), device=x0.device)
+        # 随机丢弃条件，让模型同时学会无条件生成（classifier-free guidance）
+        if torch.rand(1).item() < self.uncond_prob:
+            cond = torch.zeros_like(cond)
         noise = torch.randn_like(x0)
         x_t = self.q_sample(x0, t, noise)
-        pred = self.model(x_t, t)
+        pred = self.model(x_t, t, cond)
         return F.mse_loss(pred, noise, reduction="none").mean(dim=list(range(1, pred.ndim)))
 
     def predict_x0_from_eps(self, x_t, t, eps):
@@ -83,9 +89,17 @@ class GaussianDiffusion(nn.Module):
             + extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
         )
 
+    def model_eps(self, x_t, t, cond, w=0.0):
+        """classifier-free guidance：eps = (1+w)*eps_cond - w*eps_uncond。"""
+        if w > 0:
+            eps_cond = self.model(x_t, t, cond)
+            eps_uncond = self.model(x_t, t, torch.zeros_like(cond))
+            return (1.0 + w) * eps_cond - w * eps_uncond
+        return self.model(x_t, t, cond)
+
     @torch.no_grad()
-    def p_sample(self, x_t, t):
-        eps = self.model(x_t, t)
+    def p_sample(self, x_t, t, cond, w=0.0):
+        eps = self.model_eps(x_t, t, cond, w)
         x0 = self.predict_x0_from_eps(x_t, t, eps).clamp(-1, 1)
         mean = self.q_posterior_mean(x0, x_t, t)
         if t[0].item() == 0:
@@ -95,35 +109,34 @@ class GaussianDiffusion(nn.Module):
         return mean + torch.sqrt(variance) * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, shape):
-        """DDPM 采样（逐步，慢）。shape = (batch, C, D, H, W)。"""
+    def p_sample_loop(self, shape, cond, w=0.0):
+        """DDPM 采样。cond 为目标三相占比 (batch, cond_dim)。"""
         device = next(self.model.parameters()).device
         x_t = torch.randn(shape, device=device)
         for t in tqdm(reversed(range(self.T)), desc="DDPM sampling", total=self.T, dynamic_ncols=True):
             t_tensor = torch.full((shape[0],), t, dtype=torch.long, device=device)
-            x_t = self.p_sample(x_t, t_tensor)
+            x_t = self.p_sample(x_t, t_tensor, cond, w)
         return x_t
 
     @torch.no_grad()
-    def ddim_sample(self, x_t, t, prev_t, eta=0.0):
-        eps = self.model(x_t, t)
+    def ddim_sample(self, x_t, t, prev_t, cond, w=0.0, eta=0.0):
+        eps = self.model_eps(x_t, t, cond, w)
         alpha_t = extract(self.alphas_cumprod, t, x_t.shape)
         alpha_prev = extract(self.alphas_cumprod, prev_t, x_t.shape)
         x0 = (x_t - torch.sqrt(1.0 - alpha_t) * eps) / torch.sqrt(alpha_t)
-        # eta=0 确定性 DDIM，eta=1 接近 DDPM
         sigma = eta * torch.sqrt((1.0 - alpha_prev) / (1.0 - alpha_t) * (1.0 - alpha_t / alpha_prev))
         noise = torch.randn_like(x_t)
         x_prev = torch.sqrt(alpha_prev) * x0 + torch.sqrt(1.0 - alpha_prev - sigma ** 2) * eps + sigma * noise
         return x_prev
 
     @torch.no_grad()
-    def ddim_sample_loop(self, shape, sampling_T=100, eta=0.0):
-        """DDIM 跳步采样（快）。"""
+    def ddim_sample_loop(self, shape, cond, sampling_T=100, w=0.0, eta=0.0):
+        """DDIM 跳步采样。"""
         device = next(self.model.parameters()).device
         x_t = torch.randn(shape, device=device)
         steps = torch.linspace(self.T - 1, 0, sampling_T).long()
         for i in tqdm(range(sampling_T - 1), desc="DDIM sampling", total=sampling_T - 1, dynamic_ncols=True):
             t = torch.full((shape[0],), steps[i].item(), dtype=torch.long, device=device)
             prev_t = torch.full((shape[0],), steps[i + 1].item(), dtype=torch.long, device=device)
-            x_t = self.ddim_sample(x_t, t, prev_t, eta)
+            x_t = self.ddim_sample(x_t, t, prev_t, cond, w, eta)
         return x_t
