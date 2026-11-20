@@ -51,13 +51,12 @@ def main():
     # 目标三相占比条件
     if args.cond:
         cond = torch.tensor([float(v) for v in args.cond.split(",")], device=device).unsqueeze(0)
-        print(f"条件采样：目标三相占比 {args.cond}")
+        w = args.w if args.w is not None else COND_CONFIG["guidance_w"]
+        print(f"条件采样：目标三相占比 {args.cond}，引导强度 w = {w}")
     else:
         cond = torch.zeros(1, COND_CONFIG["cond_dim"], device=device)
-        print("无条件采样（条件为零向量）")
-
-    w = args.w if args.w is not None else COND_CONFIG["guidance_w"]
-    print(f"引导强度 w = {w}")
+        w = 0.0  # 无条件：不做引导，等价于原始无条件生成
+        print("无条件采样（w=0）")
 
     shape = (1, MODEL_CONFIG["in_ch"], args.size, args.size, args.size)
     for i in range(args.num):
