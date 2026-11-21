@@ -64,7 +64,7 @@ def main():
     ap.add_argument("--ref-num", type=int, default=10)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--max-r", type=int, default=32, help="最大距离（体素）")
-    ap.add_argument("--out", default="s2_comparison.png", help="输出图片文件名")
+    ap.add_argument("--out", default=None, help="输出图片路径（默认存到生成样本目录下）")
     args = ap.parse_args()
 
     files = sorted(glob.glob(os.path.join(args.dir, "*_label.npy")))
@@ -101,8 +101,9 @@ def main():
 
     fig.suptitle(f"S2 two-point correlation (generated vs validation)", y=1.02)
     plt.tight_layout()
-    plt.savefig(args.out, dpi=150, bbox_inches="tight")
-    print(f"已保存图片: {os.path.abspath(args.out)}")
+    out_path = args.out if args.out else os.path.join(args.dir, "s2_comparison.png")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"已保存图片: {os.path.abspath(out_path)}")
 
 
 if __name__ == "__main__":
